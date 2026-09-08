@@ -23,6 +23,28 @@ class SeedResult:
     updated: int = 0
 
 
+def _record_seed_audit_event(action: str, secret: SeededSecretSpec, row: Any) -> None:
+    """Record demo reconciliation metadata without including the seeded value."""
+    from m8flow_backend.services.audit_log_service import get_audit_log_service
+
+    get_audit_log_service().try_record_event(
+        category="configuration",
+        event_type="vault_demo.configuration_variable.seed",
+        source="vault_demo",
+        status="success",
+        actor_type="system",
+        tenant_id=secret.tenant_id,
+        resource_type="m8flow_named_value",
+        resource_id=row.id,
+        resource_name=row.name,
+        details={
+            "seed_action": action,
+            "is_sensitive": bool(row.is_sensitive),
+            "is_configured": bool(row.is_configured),
+        },
+    )
+
+
 def _positive_float_env(name: str, default: float) -> float:
     raw_value = os.getenv(name)
     if raw_value is None or not raw_value.strip():
@@ -156,15 +178,17 @@ def reconcile_seeded_values(
             )
             values[normalized_name.casefold()] = row
             result.created += 1
+            _record_seed_audit_event("created", secret, row)
             continue
 
         # Never overwrite a value-only Vault document merely because the demo
         # profile runs again. Explicit overwrite is the sole replacement path.
         if existing.is_sensitive and not overwrite:
             result.reused += 1
+            _record_seed_audit_event("reused", secret, existing)
             continue
 
-        named_value_service.update_value(
+        row = named_value_service.update_value(
             existing,
             name=existing.name,
             value=secret.value,
@@ -172,6 +196,7 @@ def reconcile_seeded_values(
             is_sensitive=True,
         )
         result.updated += 1
+        _record_seed_audit_event("updated", secret, row)
 
     return result
 

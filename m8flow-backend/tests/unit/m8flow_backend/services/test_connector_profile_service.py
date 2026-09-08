@@ -60,7 +60,9 @@ class _StubProfile:
 
     def __init__(self, **kwargs) -> None:
         self.id = kwargs.get("id", PROFILE_ID)
+        self.m8f_tenant_id = kwargs.get("m8f_tenant_id", "tenant-a")
         self.connector_type = kwargs.get("connector_type", "smtp")
+        self.profile_name = kwargs.get("profile_name", "SMTP profile")
         self.config_json = kwargs.get("config_json", {})
         self.secret_refs = kwargs.get("secret_refs", {})
         self.is_active = kwargs.get("is_active", True)
@@ -407,13 +409,70 @@ def test_deactivate_is_a_soft_delete(monkeypatch, backend, no_commit):
     """Deactivating clears is_active but leaves the row and its secrets in
     place, so the profile stays recoverable."""
     profile = _StubProfile(is_active=True)
+    events: list[dict[str, object]] = []
     monkeypatch.setattr(
         ConnectorProfileService, "get_profile", classmethod(lambda cls, _id: profile)
+    )
+    monkeypatch.setattr(
+        connector_profile_service,
+        "get_audit_log_service",
+        lambda: SimpleNamespace(try_record_event=lambda **kwargs: events.append(kwargs)),
     )
 
     ConnectorProfileService.deactivate_profile(profile.id)
 
     assert profile.is_active is False
+    assert events == [
+        {
+            "category": "connector",
+            "event_type": "connector.configuration.deactivate",
+            "source": "connector_profile_service",
+            "status": "success",
+            "tenant_id": "tenant-a",
+            "resource_type": "m8flow_connector_configuration",
+            "resource_id": PROFILE_ID,
+            "resource_name": profile.profile_name,
+            "details": {"connector_type": "smtp", "is_active": False},
+        }
+    ]
+
+
+def test_connector_variable_audit_event_contains_metadata_not_the_value(monkeypatch) -> None:
+    events: list[dict[str, object]] = []
+    variable = SimpleNamespace(
+        id="variable-id",
+        m8f_tenant_id="tenant-a",
+        connector_configuration_id=PROFILE_ID,
+        field_name="smtp_password",
+        is_sensitive=True,
+        is_configured=True,
+    )
+    monkeypatch.setattr(
+        connector_profile_service,
+        "get_audit_log_service",
+        lambda: SimpleNamespace(try_record_event=lambda **kwargs: events.append(kwargs)),
+    )
+
+    ConnectorProfileService._audit_variable_event("update", variable)
+
+    assert events == [
+        {
+            "category": "connector",
+            "event_type": "connector.variable.update",
+            "source": "connector_profile_service",
+            "status": "success",
+            "tenant_id": "tenant-a",
+            "resource_type": "m8flow_connector_variable",
+            "resource_id": "variable-id",
+            "resource_name": "smtp_password",
+            "details": {
+                "connector_configuration_id": PROFILE_ID,
+                "is_sensitive": True,
+                "is_configured": True,
+            },
+        }
+    ]
+    assert "super-secret" not in str(events)
 
 
 def test_delete_removes_the_row_before_the_secrets(monkeypatch, backend, no_commit):

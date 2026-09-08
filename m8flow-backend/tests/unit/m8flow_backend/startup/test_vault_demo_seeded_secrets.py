@@ -318,6 +318,43 @@ def test_seed_reconciliation_creates_catalog_entry_without_persisting_plaintext(
     assert _SeededNamedValueService.rows[0].value is None
 
 
+def test_seed_audit_event_records_catalog_metadata_without_the_seeded_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from m8flow_backend.services import audit_log_service
+
+    events: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        audit_log_service,
+        "get_audit_log_service",
+        lambda: type("AuditLog", (), {"try_record_event": lambda _self, **kwargs: events.append(kwargs)})(),
+    )
+
+    seed_named_values._record_seed_audit_event(
+        "created", _seeded_secret(value="must-not-be-audited"), _SeededRow("API_TOKEN")
+    )
+
+    assert events == [
+        {
+            "category": "configuration",
+            "event_type": "vault_demo.configuration_variable.seed",
+            "source": "vault_demo",
+            "status": "success",
+            "actor_type": "system",
+            "tenant_id": "tenant-123",
+            "resource_type": "m8flow_named_value",
+            "resource_id": "id-api_token",
+            "resource_name": "API_TOKEN",
+            "details": {
+                "seed_action": "created",
+                "is_sensitive": True,
+                "is_configured": True,
+            },
+        }
+    ]
+    assert "must-not-be-audited" not in str(events)
+
+
 def test_seed_verification_requires_sensitive_catalog_rows_and_provider_values() -> None:
     row = _SeededRow("API_TOKEN")
     _SeededNamedValueService.reset([row])

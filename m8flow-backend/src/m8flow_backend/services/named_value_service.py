@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -7,6 +8,7 @@ from sqlalchemy import func, null
 from sqlalchemy.exc import IntegrityError
 
 from m8flow_backend.models.named_value import NamedValueModel
+from m8flow_backend.services.audit_log_service import get_audit_log_service
 from m8flow_backend.services.named_value_secret_storage import get_named_value_secret_storage
 from spiffworkflow_backend.exceptions.api_error import ApiError
 from spiffworkflow_backend.models.db import db
@@ -16,6 +18,24 @@ _VALUE_UNSET = object()
 
 class NamedValueService:
     """CRUD for the catalog and payloads of manual configuration variables."""
+
+    @staticmethod
+    def _audit_lifecycle_event(action: str, row: Any) -> None:
+        """Record catalog lifecycle metadata without reading or logging its value."""
+        get_audit_log_service().try_record_event(
+            category="configuration",
+            event_type=f"configuration_variable.{action}",
+            source="named_value_service",
+            status="success",
+            resource_type="m8flow_named_value",
+            resource_id=row.id,
+            resource_name=row.name,
+            tenant_id=row.m8f_tenant_id,
+            details={
+                "is_sensitive": bool(row.is_sensitive),
+                "is_configured": bool(row.is_configured),
+            },
+        )
 
     @staticmethod
     def _stored_value(value: Any, is_sensitive: bool) -> Any:
@@ -127,6 +147,7 @@ class NamedValueService:
                 except Exception:
                     pass
             raise
+        NamedValueService._audit_lifecycle_event("create", row)
         return row
 
     @staticmethod
@@ -195,14 +216,25 @@ class NamedValueService:
                 storage.delete(row)
             except Exception:
                 pass
+        NamedValueService._audit_lifecycle_event("update", row)
         return row
 
     @staticmethod
     def delete_value(row: NamedValueModel) -> None:
+        # Keep the safe catalog metadata available for the audit event after
+        # the row is deleted and its sensitive payload is removed.
+        audit_row = SimpleNamespace(
+            id=row.id,
+            name=row.name,
+            m8f_tenant_id=row.m8f_tenant_id,
+            is_sensitive=row.is_sensitive,
+            is_configured=row.is_configured,
+        )
         if row.is_sensitive:
             get_named_value_secret_storage().delete(row)
         db.session.delete(row)
         db.session.commit()
+        NamedValueService._audit_lifecycle_event("delete", audit_row)
 
     @staticmethod
     def resolve_value(row: NamedValueModel) -> Any:

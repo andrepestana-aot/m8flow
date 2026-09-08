@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import re
+from types import SimpleNamespace
 from typing import Any
 
 from spiffworkflow_backend.models.db import db
@@ -31,6 +32,7 @@ from m8flow_backend.models.connector_configuration import (
     ConnectorConfigurationModel,
     ConnectorVariableModel,
 )
+from m8flow_backend.services.audit_log_service import get_audit_log_service
 from m8flow_backend.services.connector_secret_backend import secret_backend
 from m8flow_backend.services.connector_profile_storage_service import (
     persist_profile_document,
@@ -69,6 +71,51 @@ class ConnectorProfileError(Exception):
 
 class ConnectorProfileService:
     # ------------------------------------------------------------------ read
+
+    @staticmethod
+    def _audit_profile_event(action: str, profile: Any) -> None:
+        """Record profile metadata only; configuration and credentials stay out of audit details."""
+        get_audit_log_service().try_record_event(
+            category="connector",
+            event_type=f"connector.configuration.{action}",
+            source="connector_profile_service",
+            status="success",
+            tenant_id=profile.m8f_tenant_id,
+            resource_type="m8flow_connector_configuration",
+            resource_id=profile.id,
+            resource_name=profile.profile_name,
+            details={
+                "connector_type": profile.connector_type,
+                "is_active": bool(profile.is_active),
+            },
+        )
+
+    @staticmethod
+    def _audit_variable_event(action: str, variable: Any) -> None:
+        get_audit_log_service().try_record_event(
+            category="connector",
+            event_type=f"connector.variable.{action}",
+            source="connector_profile_service",
+            status="success",
+            tenant_id=variable.m8f_tenant_id,
+            resource_type="m8flow_connector_variable",
+            resource_id=variable.id,
+            resource_name=variable.field_name,
+            details={
+                "connector_configuration_id": variable.connector_configuration_id,
+                "is_sensitive": bool(variable.is_sensitive),
+                "is_configured": bool(variable.is_configured),
+            },
+        )
+
+    @staticmethod
+    def _variables_for_profile(profile: ConnectorConfigurationModel) -> list[ConnectorVariableModel]:
+        if not isinstance(profile, ConnectorConfigurationModel):
+            return []
+        return ConnectorVariableModel.query.filter(
+            ConnectorVariableModel.connector_configuration_id == profile.id,
+            ConnectorVariableModel.m8f_tenant_id == profile.m8f_tenant_id,
+        ).all()
 
     @staticmethod
     def _tenant_query():
@@ -193,6 +240,9 @@ class ConnectorProfileService:
             profile.secret_refs = cls._write_secrets(profile.id, secret_values, user_id)
 
         db.session.commit()
+        cls._audit_profile_event("create", profile)
+        for variable in cls._variables_for_profile(profile):
+            cls._audit_variable_event("create", variable)
         logger.info(
             "Created connector profile '%s' for connector '%s' (id=%s)",
             profile_name,
@@ -215,10 +265,16 @@ class ConnectorProfileService:
         if "is_active" in body:
             profile.is_active = bool(body["is_active"])
 
+        variable_changes: list[tuple[str, ConnectorVariableModel]] = []
         if "config" in body:
-            cls._update_config(profile, definition, dict(body["config"] or {}), user_id)
+            variable_changes = cls._update_config(
+                profile, definition, dict(body["config"] or {}), user_id
+            )
 
         db.session.commit()
+        cls._audit_profile_event("update", profile)
+        for action, variable in variable_changes:
+            cls._audit_variable_event(action, variable)
         return profile
 
     @classmethod
@@ -228,7 +284,7 @@ class ConnectorProfileService:
         definition: type[ConnectorDefinition],
         submitted: dict[str, Any],
         user_id: int | None,
-    ) -> None:
+    ) -> list[tuple[str, ConnectorVariableModel]]:
         """Merge a config patch, treating blank secrets as "leave unchanged".
 
         Secret values are write-only, so the form cannot echo the current one
@@ -271,8 +327,7 @@ class ConnectorProfileService:
         profile.config_json = config_values
 
         if not secret_updates:
-            cls._sync_variable_rows(profile, definition, cleaned, user_id)
-            return
+            return cls._sync_variable_rows(profile, definition, cleaned, user_id)
 
         backend = secret_backend()
         if getattr(backend, "capabilities", None) and getattr(
@@ -308,8 +363,7 @@ class ConnectorProfileService:
                 raise ConnectorProfileError(
                     "Could not update the profile's credentials.", status_code=500
                 ) from exc
-            cls._sync_variable_rows(profile, definition, cleaned, user_id)
-            return
+            return cls._sync_variable_rows(profile, definition, cleaned, user_id)
 
         refs = dict(profile.secret_refs or {})
         for name, value in secret_updates.items():
@@ -320,7 +374,7 @@ class ConnectorProfileService:
             backend.upsert(key, str(value), user_id)
             refs[name] = key
         profile.secret_refs = refs
-        cls._sync_variable_rows(profile, definition, cleaned, user_id)
+        return cls._sync_variable_rows(profile, definition, cleaned, user_id)
 
     @staticmethod
     def _sync_variable_rows(
@@ -328,12 +382,12 @@ class ConnectorProfileService:
         definition: type[ConnectorDefinition],
         values: dict[str, Any],
         user_id: int | None,
-    ) -> None:
+    ) -> list[tuple[str, ConnectorVariableModel]]:
         """Keep PostgreSQL metadata aligned without persisting sensitive values."""
         # Lightweight profile stubs are used by the isolated credential-update
         # tests. Real CRUD always supplies the mapped configuration model.
         if not isinstance(profile, ConnectorConfigurationModel):
-            return
+            return []
         # Do not use ``profile.variables`` here. SQLAlchemy may not have loaded
         # that relationship in this session, in which case treating it as the
         # complete set would insert duplicate field rows on profile updates.
@@ -344,15 +398,26 @@ class ConnectorProfileService:
                 ConnectorVariableModel.m8f_tenant_id == profile.m8f_tenant_id,
             ).all()
         }
+        changes: list[tuple[str, ConnectorVariableModel]] = []
         for row in variable_rows(profile, definition, values, user_id):
             current = existing.get(row.field_name)
             if current is None:
                 db.session.add(row)
+                changes.append(("create", row))
                 continue
+            changed = (
+                current.is_sensitive != row.is_sensitive
+                or current.value != row.value
+                or current.is_configured != row.is_configured
+                or current.user_id != user_id
+            )
             current.is_sensitive = row.is_sensitive
             current.value = row.value
             current.is_configured = row.is_configured
             current.user_id = user_id
+            if changed:
+                changes.append(("update", current))
+        return changes
 
     @classmethod
     def deactivate_profile(cls, configuration_id: str) -> ConnectorConfigurationModel:
@@ -365,6 +430,7 @@ class ConnectorProfileService:
         profile = cls.get_profile(configuration_id)
         profile.is_active = False
         db.session.commit()
+        cls._audit_profile_event("deactivate", profile)
         return profile
 
     @classmethod
@@ -375,6 +441,24 @@ class ConnectorProfileService:
         unreachable secrets rather than a row pointing at secrets that are gone.
         """
         profile = cls.get_profile(configuration_id)
+        profile_audit_row = SimpleNamespace(
+            id=profile.id,
+            m8f_tenant_id=profile.m8f_tenant_id,
+            connector_type=profile.connector_type,
+            profile_name=profile.profile_name,
+            is_active=profile.is_active,
+        )
+        variables = [
+            SimpleNamespace(
+                id=variable.id,
+                m8f_tenant_id=variable.m8f_tenant_id,
+                connector_configuration_id=variable.connector_configuration_id,
+                field_name=variable.field_name,
+                is_sensitive=variable.is_sensitive,
+                is_configured=variable.is_configured,
+            )
+            for variable in cls._variables_for_profile(profile)
+        ]
         refs = list((profile.secret_refs or {}).values())
         # Legacy rows created before the document cutover do not have this
         # nullable column on their lightweight test doubles (or in old data),
@@ -384,6 +468,9 @@ class ConnectorProfileService:
 
         db.session.delete(profile)
         db.session.commit()
+        cls._audit_profile_event("delete", profile_audit_row)
+        for variable in variables:
+            cls._audit_variable_event("delete", variable)
 
         if document_key and getattr(backend, "capabilities", None) and getattr(
             backend.capabilities, "supports_secret_documents", False

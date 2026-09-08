@@ -30,6 +30,14 @@ class _Session:
         pass
 
 
+class _AuditLog:
+    def __init__(self) -> None:
+        self.events: list[dict[str, object]] = []
+
+    def try_record_event(self, **kwargs) -> None:
+        self.events.append(kwargs)
+
+
 def test_sensitive_update_keeps_provider_value_when_input_is_blank(monkeypatch) -> None:
     storage = _Storage()
     row = SimpleNamespace(
@@ -51,11 +59,13 @@ def test_sensitive_update_keeps_provider_value_when_input_is_blank(monkeypatch) 
 
 def test_sensitive_update_replaces_only_provider_value(monkeypatch) -> None:
     storage = _Storage()
+    audit_log = _AuditLog()
     row = SimpleNamespace(
         id="immutable-id", m8f_tenant_id="tenant-a", name="OLD_NAME", description=None,
         is_sensitive=True, is_configured=True, user_id=7, value=None,
     )
     monkeypatch.setattr(named_value_service, "get_named_value_secret_storage", lambda: storage)
+    monkeypatch.setattr(named_value_service, "get_audit_log_service", lambda: audit_log)
     monkeypatch.setattr(named_value_service.NamedValueService, "_ensure_name_available", lambda *args, **kwargs: None)
     monkeypatch.setattr(named_value_service.db, "session", _Session())
 
@@ -65,6 +75,20 @@ def test_sensitive_update_replaces_only_provider_value(monkeypatch) -> None:
 
     assert storage.writes == [(row, "replacement")]
     assert row.name == "RENAMED_VALUE"
+    assert audit_log.events == [
+        {
+            "category": "configuration",
+            "event_type": "configuration_variable.update",
+            "source": "named_value_service",
+            "status": "success",
+            "resource_type": "m8flow_named_value",
+            "resource_id": "immutable-id",
+            "resource_name": "RENAMED_VALUE",
+            "tenant_id": "tenant-a",
+            "details": {"is_sensitive": True, "is_configured": True},
+        }
+    ]
+    assert "replacement" not in str(audit_log.events)
 
 
 def test_update_without_value_preserves_a_non_sensitive_value(monkeypatch) -> None:
