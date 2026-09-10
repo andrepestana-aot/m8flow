@@ -3253,7 +3253,8 @@ components:
         name: {type: string, maxLength: 255}
         description: {type: string, nullable: true}
         value: {}
-        is_sensitive: {type: boolean, default: false}
+        # Omit to preserve the existing sensitivity classification.
+        is_sensitive: {type: boolean}
     HealthResponse:
       type: object
       properties:

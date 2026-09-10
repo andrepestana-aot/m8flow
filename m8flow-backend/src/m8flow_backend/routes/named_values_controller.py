@@ -35,14 +35,16 @@ def _body(*, require_value: bool) -> dict:
         raise ApiError("invalid_name", "name must be 1-255 characters.", status_code=400)
     if require_value and "value" not in body:
         raise ApiError("invalid_value", "value is required.", status_code=400)
-    is_sensitive = body.get("is_sensitive", body.get("isSensitive", False))
-    if not isinstance(is_sensitive, bool):
-        raise ApiError("invalid_sensitivity", "is_sensitive must be boolean.", status_code=400)
     data = {
         "name": name.strip(),
         "description": body.get("description"),
-        "is_sensitive": is_sensitive,
     }
+    sensitivity_marker = object()
+    is_sensitive = body.get("is_sensitive", body.get("isSensitive", sensitivity_marker))
+    if is_sensitive is not sensitivity_marker:
+        if not isinstance(is_sensitive, bool):
+            raise ApiError("invalid_sensitivity", "is_sensitive must be boolean.", status_code=400)
+        data["is_sensitive"] = is_sensitive
     if "value" in body:
         data["value"] = body["value"]
     return data

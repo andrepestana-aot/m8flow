@@ -889,7 +889,10 @@ def test_vault_list_hides_connector_profile_secrets_before_reading_documents(
     tenant_id = tenants[0]
     root = f"m8flow/tenants/{tenant_id}/secrets"
     fake_vault.storage[f"{root}/visible-secret"] = {"value": "visible"}
-    fake_vault.storage[f"{root}/connector-profile"] = {"value": "credential-document"}
+    # A generic secret may legitimately share a connector profile's display
+    # name; profile names are metadata, not secret-store keys.
+    fake_vault.storage[f"{root}/connector-profile"] = {"value": "unrelated-secret"}
+    fake_vault.storage[f"{root}/17"] = {"value": "credential-document"}
     fake_vault.storage[f"{root}/cnx.1.smtp_password"] = {"value": "legacy-credential"}
 
     class FakeQuery:
@@ -912,8 +915,11 @@ def test_vault_list_hides_connector_profile_secrets_before_reading_documents(
         g.m8flow_tenant_id = tenant_id
         records = backend.list_secrets()
 
-    assert [record.key for record in records] == ["visible-secret"]
-    assert fake_vault.retrieve_calls == [f"{root}/visible-secret"]
+    assert [record.key for record in records] == ["connector-profile", "visible-secret"]
+    assert fake_vault.retrieve_calls == [
+        f"{root}/connector-profile",
+        f"{root}/visible-secret",
+    ]
 
 
 def test_legacy_vault_document_without_metadata_still_resolves(app, tenants) -> None:

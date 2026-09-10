@@ -69,7 +69,6 @@ def _connector_profile_secret_keys(tenant_id: str | None) -> set[str]:
                 hidden.add(key.strip())
         if profile.provider_key:
             hidden.add(profile.provider_key.rstrip("/").rsplit("/", 1)[-1])
-            hidden.add(profile.profile_name)
     return hidden
 
 

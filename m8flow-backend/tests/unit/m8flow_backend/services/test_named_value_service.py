@@ -57,6 +57,25 @@ def test_sensitive_update_keeps_provider_value_when_input_is_blank(monkeypatch) 
     assert row.value is not None
 
 
+def test_sensitive_metadata_update_preserves_sensitivity_when_omitted(monkeypatch) -> None:
+    storage = _Storage()
+    row = SimpleNamespace(
+        id="immutable-id", m8f_tenant_id="tenant-a", name="OLD_NAME", description="old",
+        is_sensitive=True, is_configured=True, user_id=7, value=None,
+    )
+    monkeypatch.setattr(named_value_service, "get_named_value_secret_storage", lambda: storage)
+    monkeypatch.setattr(named_value_service.NamedValueService, "_ensure_name_available", lambda *args, **kwargs: None)
+    monkeypatch.setattr(named_value_service.db, "session", _Session())
+
+    named_value_service.NamedValueService.update_value(
+        row, name="RENAMED_VALUE", description="new"
+    )
+
+    assert row.is_sensitive is True
+    assert row.value is not None
+    assert storage.writes == []
+
+
 def test_sensitive_update_replaces_only_provider_value(monkeypatch) -> None:
     storage = _Storage()
     audit_log = _AuditLog()

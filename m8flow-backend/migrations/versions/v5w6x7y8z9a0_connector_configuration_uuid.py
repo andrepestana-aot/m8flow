@@ -21,6 +21,10 @@ depends_on = None
 
 CONFIGURATION_TABLE = "m8flow_connector_configuration"
 VARIABLE_TABLE = "m8flow_connector_variable"
+VARIABLE_CONFIGURATION_FK = "m8flow_connector_variable_connector_configuration_id_fkey"
+VARIABLE_CONFIGURATION_UNIQUE = "uq_m8flow_connector_variable_field"
+VARIABLE_CONFIGURATION_INDEX = "ix_m8flow_connector_variable_connector_configuration_id"
+VARIABLE_TENANT_CONFIGURATION_INDEX = "ix_m8flow_connector_variable_tenant_configuration"
 
 
 def _is_postgres() -> bool:
@@ -36,12 +40,12 @@ def _replace_postgres_columns() -> None:
         sa.text(
             f"ALTER TABLE {VARIABLE_TABLE} "
             "DROP CONSTRAINT IF EXISTS "
-            "m8flow_connector_variable_connector_configuration_id_fkey"
+            f"{VARIABLE_CONFIGURATION_FK}"
         )
     )
-    op.execute(sa.text("DROP INDEX IF EXISTS ix_m8flow_connector_variable_connector_configuration_id"))
-    op.execute(sa.text("DROP INDEX IF EXISTS ix_m8flow_connector_variable_tenant_configuration"))
-    op.execute(sa.text(f"ALTER TABLE {VARIABLE_TABLE} DROP CONSTRAINT IF EXISTS uq_m8flow_connector_variable_field"))
+    op.execute(sa.text(f"DROP INDEX IF EXISTS {VARIABLE_CONFIGURATION_INDEX}"))
+    op.execute(sa.text(f"DROP INDEX IF EXISTS {VARIABLE_TENANT_CONFIGURATION_INDEX}"))
+    op.execute(sa.text(f"ALTER TABLE {VARIABLE_TABLE} DROP CONSTRAINT IF EXISTS {VARIABLE_CONFIGURATION_UNIQUE}"))
     op.execute(sa.text(f"ALTER TABLE {CONFIGURATION_TABLE} DROP CONSTRAINT IF EXISTS {CONFIGURATION_TABLE}_pkey"))
 
     op.execute(sa.text(f"ALTER TABLE {CONFIGURATION_TABLE} DROP COLUMN id"))
@@ -62,17 +66,17 @@ def _replace_postgres_columns() -> None:
     )
     op.execute(
         sa.text(
-            f"ALTER TABLE {VARIABLE_TABLE} ADD CONSTRAINT uq_m8flow_connector_variable_field "
+            f"ALTER TABLE {VARIABLE_TABLE} ADD CONSTRAINT {VARIABLE_CONFIGURATION_UNIQUE} "
             "UNIQUE (connector_configuration_id, field_name)"
         )
     )
     op.create_index(
-        "ix_m8flow_connector_variable_connector_configuration_id",
+        VARIABLE_CONFIGURATION_INDEX,
         VARIABLE_TABLE,
         ["connector_configuration_id"],
     )
     op.create_index(
-        "ix_m8flow_connector_variable_tenant_configuration",
+        VARIABLE_TENANT_CONFIGURATION_INDEX,
         VARIABLE_TABLE,
         ["m8f_tenant_id", "connector_configuration_id"],
     )
@@ -120,14 +124,29 @@ def upgrade() -> None:
         return
 
     # SQLite has no ALTER COLUMN support, so batch mode recreates the tables.
+    # Drop and recreate the child indexes and unique constraint explicitly;
+    # otherwise a backend-specific batch implementation can retain an index
+    # over the temporary integer column or lose the field uniqueness rule.
     # Profile metadata and provider_key values are copied intact.
     with op.batch_alter_table(VARIABLE_TABLE, recreate="always") as batch:
+        batch.drop_index(VARIABLE_CONFIGURATION_INDEX)
+        batch.drop_index(VARIABLE_TENANT_CONFIGURATION_INDEX)
+        batch.drop_constraint(VARIABLE_CONFIGURATION_UNIQUE, type_="unique")
         batch.drop_column("connector_configuration_id")
         batch.alter_column(
             "connector_configuration_uuid",
             new_column_name="connector_configuration_id",
             existing_type=sa.String(36),
             nullable=False,
+        )
+        batch.create_unique_constraint(
+            VARIABLE_CONFIGURATION_UNIQUE,
+            ["connector_configuration_id", "field_name"],
+        )
+        batch.create_index(VARIABLE_CONFIGURATION_INDEX, ["connector_configuration_id"])
+        batch.create_index(
+            VARIABLE_TENANT_CONFIGURATION_INDEX,
+            ["m8f_tenant_id", "connector_configuration_id"],
         )
 
     with op.batch_alter_table(CONFIGURATION_TABLE, recreate="always") as batch:

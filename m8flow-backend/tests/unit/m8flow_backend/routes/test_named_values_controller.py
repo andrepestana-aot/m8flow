@@ -62,7 +62,6 @@ def test_update_body_allows_an_omitted_value_but_create_requires_one() -> None:
         assert controller._body(require_value=False) == {
             "name": "API_TOKEN",
             "description": None,
-            "is_sensitive": False,
         }
 
     with app.test_request_context("/", json={"name": "API_TOKEN"}), pytest.raises(

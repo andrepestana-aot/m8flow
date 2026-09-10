@@ -157,13 +157,18 @@ class NamedValueService:
         name: str,
         description: str | None,
         value: Any = _VALUE_UNSET,
-        is_sensitive: bool = False,
+        is_sensitive: bool | None = None,
     ) -> NamedValueModel:
         name = NamedValueService.normalize_name(name)
         NamedValueService._ensure_name_available(
             row.m8f_tenant_id, name, exclude_id=row.id
         )
         value_supplied = value is not _VALUE_UNSET
+        # An update may omit sensitivity when changing only safe metadata.
+        # Preserve the catalog state instead of silently converting a sensitive
+        # variable to a non-sensitive one.
+        if is_sensitive is None:
+            is_sensitive = row.is_sensitive
         if row.is_sensitive and not is_sensitive and (not value_supplied or not value):
             raise ApiError(
                 "value_required",
