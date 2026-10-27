@@ -1,0 +1,33 @@
+name: Snyk Container Image Scans
+
+on:
+  workflow_dispatch:
+    inputs:
+      component:
+        description: "Select one M8Flow app image, or all to scan every configured image"
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - m8flow-backend
+          - m8flow-designer
+          - m8flow-keycloak
+          - m8flow-node-wire-proxy
+          - m8flow-mcp
+      release_tag:
+        description: "Existing M8Flow image tag to scan from Docker Hub (for example 2.0.0-rc)"
+        required: true
+        type: string
+
+# This bootstrap makes the workflow_dispatch entry available from the default
+# branch. Choose the Snyk feature branch in the Actions UI to run its full scan
+# workflow; this fallback job only explains what to do if main is selected.
+jobs:
+  select-scan-branch:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain branch selection
+        run: |
+          echo "::notice::Select the Snyk feature branch in the workflow ref selector to run its full image scans."
